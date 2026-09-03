@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# TraPed
+outputs/
+cache/
+*.pt
+.pytest_cache/

@@ -1,0 +1,41 @@
+site:
+  name: ExpresswayA
+  data_dir: data/expresswayAsample
+  source_fps: 30.0
+  pixel_per_meter: null   # infer from lat/lon ↔ pixel affine (~17.91)
+
+window:
+  target_fps: 10.0
+  t_input_s: 3.0          # 30 frames @ 10 Hz
+  t_horizon_s: 5.0        # 50 frames; ~100–150 m at highway speed, covers merge decisions
+  n_agents: 12
+  stride_s: 1.0
+  max_neighbor_m: 80.0
+  map_radius_m: 100.0
+  n_map_tokens: 48
+  n_pts_polyline: 20
+
+split:
+  train: 0.70
+  val: 0.15
+  test: 0.15
+
+model:
+  d_model: 128
+  nhead: 4
+  n_temporal_layers: 2
+  n_social_layers: 2
+  n_decoder_layers: 1
+  n_modes: 6
+  dropout: 0.1
+
+train:
+  batch_size: 32
+  epochs: 25
+  lr: 0.001
+  weight_decay: 0.0001
+  warmup_epochs: 2
+  seed: 42
+  amp: true
+
+output_dir: outputs
