@@ -34,6 +34,7 @@ class SceneSample:
     t_last: int
     split: str
     csv_stem: str
+    site: str = ""
 
 
 def _downsample_track(tr: dict, stride: int, frame0: int) -> dict:

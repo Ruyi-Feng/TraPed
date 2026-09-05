@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -36,19 +37,50 @@ class Recording:
     frame_num_min: int
 
 
-def discover_site(data_dir: str | Path) -> SiteFiles:
+def discover_site(
+    data_dir: str | Path,
+    *,
+    trajectory_dir: str | Path | None = None,
+    csv_glob: str = "*.csv",
+    exclude_globs: Sequence[str] = ("metadata.csv", "._*.csv", "*_located.csv"),
+    lanes_npy: str | Path | None = None,
+    background: str | Path | None = None,
+    lane_png: str | Path | None = None,
+) -> SiteFiles:
     root = Path(data_dir)
+    traj_root = _resolve(root, trajectory_dir) if trajectory_dir else root
     csvs = sorted(
-        p for p in root.glob("*.csv") if p.name.lower() != "metadata.csv"
+        p for p in traj_root.glob(csv_glob)
+        if p.is_file() and not any(
+            fnmatch(p.name.lower(), pat.lower()) for pat in exclude_globs
+        )
     )
-    npy = _first(root, ["*Lanes.npy", "*lanes.npy", "*.npy"])
-    bg = _first(root, ["*Background.png", "*background.png", "*Background.jpg"])
-    lane_png = _first(root, ["*Lane.png", "*lane.png"])
+    npy = _resolve(root, lanes_npy) if lanes_npy else _first(
+        root, ["*Lanes.npy", "*lanes.npy", "*.npy"]
+    )
+    bg = _resolve(root, background) if background else _first(
+        root, ["*Background.png", "*background.png", "*Background.jpg"]
+    )
+    lane_img = _resolve(root, lane_png) if lane_png else _first(
+        root, ["*Lane.png", "*lane.png"]
+    )
     if not csvs:
-        raise FileNotFoundError(f"no trajectory CSV under {root}")
+        raise FileNotFoundError(
+            f"no trajectory CSV matching {csv_glob!r} under {traj_root}"
+        )
+    for label, path in (("lanes_npy", npy), ("background", bg)):
+        if path is not None and not path.exists():
+            raise FileNotFoundError(f"{label} does not exist: {path}")
     return SiteFiles(
-        data_dir=root, csvs=csvs, lanes_npy=npy, background=bg, lane_png=lane_png
+        data_dir=root, csvs=csvs, lanes_npy=npy, background=bg, lane_png=lane_img
     )
+
+
+def _resolve(root: Path, path: str | Path | None) -> Optional[Path]:
+    if path is None:
+        return None
+    out = Path(path)
+    return out if out.is_absolute() else root / out
 
 
 def _first(root: Path, patterns: List[str]) -> Optional[Path]:
@@ -78,6 +110,22 @@ def infer_pixel_per_meter(df: pd.DataFrame) -> float:
         ).dropna()
         if len(rx) > 10:
             return float(np.median(np.abs(rx.to_numpy())))
+
+    # CitySim FreewayC supplies world-aligned feet rather than lat/lon or metres.
+    # Both axes use the same image origin, so pixel / (feet * 0.3048) is px/m.
+    if {"carCenterX", "carCenterY", "carCenterXft", "carCenterYft"}.issubset(df.columns):
+        ratios = []
+        for px_col, ft_col in (("carCenterX", "carCenterXft"),
+                               ("carCenterY", "carCenterYft")):
+            metres = df[ft_col].to_numpy(np.float64) * 0.3048
+            pixels = df[px_col].to_numpy(np.float64)
+            valid = np.isfinite(metres) & np.isfinite(pixels) & (np.abs(metres) > 1.0)
+            if np.any(valid):
+                ratios.append(np.abs(pixels[valid] / metres[valid]))
+        if ratios:
+            ppm = float(np.median(np.concatenate(ratios)))
+            if 1.0 <= ppm <= 200.0:
+                return ppm
 
     need = {"carCenterX", "carCenterY", "carCenterLat", "carCenterLon"}
     if not need.issubset(df.columns):
@@ -132,10 +180,29 @@ def load_recording(
     savgol_poly: int = 3,
 ) -> Recording:
     path = Path(csv_path)
-    df = pd.read_csv(path)
+    header = pd.read_csv(path, nrows=0)
+    columns = set(header.columns)
+    frame_c = _col(header, FRAME_ALIASES)
+    car_c = _col(header, CAR_ALIASES)
+    lane_c = _col(header, LANE_ALIASES) if any(c in columns for c in LANE_ALIASES) else None
+
+    needed = {frame_c, car_c}
+    if lane_c:
+        needed.add(lane_c)
+    for group in (
+        ("carCenterX", "carCenterY", "carCenterXm", "carCenterYm",
+         "carCenterXft", "carCenterYft", "carCenterLat", "carCenterLon"),
+        tuple(f"boundingBox{i}{suffix}" for i in range(1, 5)
+              for suffix in ("X", "Y", "Xm", "Ym", "Xft", "Yft")),
+    ):
+        needed.update(c for c in group if c in columns)
+    df = pd.read_csv(path, usecols=sorted(needed))
     frame_c = _col(df, FRAME_ALIASES)
     car_c = _col(df, CAR_ALIASES)
     lane_c = _col(df, LANE_ALIASES) if any(c in df.columns for c in LANE_ALIASES) else None
+    # Some distributed CitySim CSVs contain large blank tails.  Drop them before
+    # integer conversion and also reject partially missing geometry below.
+    df = df.dropna(subset=[frame_c, car_c]).copy()
 
     ppm = float(pixel_per_meter) if pixel_per_meter else infer_pixel_per_meter(df)
 
@@ -151,6 +218,19 @@ def load_recording(
             ],
             axis=1,
         ).astype(np.float64)
+    elif "carCenterXft" in df.columns and "carCenterYft" in df.columns:
+        ft_to_m = 0.3048
+        x_m = df["carCenterXft"].to_numpy(np.float64) * ft_to_m
+        y_m = df["carCenterYft"].to_numpy(np.float64) * ft_to_m
+        bb = np.stack(
+            [
+                df["boundingBox1Xft"], df["boundingBox1Yft"],
+                df["boundingBox2Xft"], df["boundingBox2Yft"],
+                df["boundingBox3Xft"], df["boundingBox3Yft"],
+                df["boundingBox4Xft"], df["boundingBox4Yft"],
+            ],
+            axis=1,
+        ).astype(np.float64) * ft_to_m
     else:
         x_m = df["carCenterX"].to_numpy(np.float64) / ppm
         y_m = df["carCenterY"].to_numpy(np.float64) / ppm
@@ -165,12 +245,21 @@ def load_recording(
             dtype=np.float64,
         ) / ppm
 
+    finite = np.isfinite(x_m) & np.isfinite(y_m) & np.isfinite(bb).all(axis=1)
+    if not np.all(finite):
+        df = df.loc[finite].copy()
+        x_m = x_m[finite]
+        y_m = y_m[finite]
+        bb = bb[finite]
+    if len(df) == 0:
+        raise ValueError(f"{path}: no valid trajectory rows")
+
     rec = pd.DataFrame({
         "frame": df[frame_c].astype(np.int64),
         "car_id": df[car_c].astype(np.int64),
         "x": x_m,
         "y": y_m,
-        "lane": df[lane_c].astype(np.int64) if lane_c else -1,
+        "lane": df[lane_c].fillna(-1).astype(np.int64) if lane_c else -1,
         "bb": list(bb),
     })
     rec.sort_values(["car_id", "frame"], inplace=True)

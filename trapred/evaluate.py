@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
+from trapred.ablations import ABLATION_PROFILES, ablation_run_name
 from trapred.config import load_config
 from trapred.data.dataset import SceneDataset, build_cache
 from trapred.models.factory import ARCHES, ckpt_path, load_model_from_ckpt
@@ -76,22 +77,46 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ckpt", type=Path, default=None)
     parser.add_argument("--arch", choices=ARCHES, default="mat")
     parser.add_argument("--split", default="test", choices=["train", "val", "test"])
+    parser.add_argument("--run-name", default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--ablation", choices=tuple(ABLATION_PROFILES), default=None)
     args = parser.parse_args(argv)
+    if args.ablation is not None and args.arch != "mat_v2":
+        parser.error("--ablation requires --arch mat_v2")
 
     cfg = load_config(args.config)
+    if args.batch_size is not None:
+        cfg.train.batch_size = args.batch_size
     device = _device()
     cache_dir = build_cache(cfg, force=False)
-    ckpt = args.ckpt or ckpt_path(cfg.out_path, args.arch)
+    run_name = args.run_name
+    if run_name is None and args.ablation is not None:
+        run_name = ablation_run_name(args.ablation)
+    out_dir = cfg.out_path / run_name if run_name else cfg.out_path
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt = args.ckpt or ckpt_path(out_dir, args.arch)
     model = load_model(ckpt, device)
     ds = SceneDataset(cache_dir, args.split)
     loader = DataLoader(ds, batch_size=cfg.train.batch_size, shuffle=False)
     dt = 1.0 / float(ds.meta.get("fps", cfg.window.target_fps))
     metrics = evaluate_loader(model, loader, device, dt)
-    out_json = cfg.out_path / f"metrics_{args.split}_{args.arch}.json"
+    metrics["by_site"] = {}
+    split_sites = sorted({
+        row.get("site", "") for row in ds.meta.get("rows", [])
+        if row.get("split") == args.split and row.get("site", "")
+    })
+    for site in split_sites:
+        site_ds = SceneDataset(cache_dir, args.split, site=site)
+        site_loader = DataLoader(
+            site_ds, batch_size=cfg.train.batch_size, shuffle=False
+        )
+        metrics["by_site"][site] = evaluate_loader(model, site_loader, device, dt)
+    out_json = out_dir / f"metrics_{args.split}_{args.arch}.json"
     out_json.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     print(json.dumps(metrics, indent=2))
-    plot_samples(model, ds, cfg.out_path / f"qual_{args.split}_{args.arch}.png", device)
-    print("plots ->", cfg.out_path / f"qual_{args.split}_{args.arch}.png")
+    plot_path = out_dir / f"qual_{args.split}_{args.arch}.png"
+    plot_samples(model, ds, plot_path, device)
+    print("plots ->", plot_path)
     return 0
 
 

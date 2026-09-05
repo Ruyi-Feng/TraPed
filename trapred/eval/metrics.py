@@ -31,11 +31,29 @@ def batch_metrics(out: dict, future: torch.Tensor, future_valid: torch.Tensor) -
     ade, fde = _masked_ade_fde(traj, gt, valid)
     k_ml = pi.argmax(axis=-1)
     b = np.arange(gt.shape[0])
+    ranked = np.argsort(-pi, axis=-1)
+    k3 = ranked[:, :min(3, ranked.shape[1])]
+    k5 = ranked[:, :min(5, ranked.shape[1])]
+    ade3 = np.take_along_axis(ade, k3, axis=1).min(axis=-1)
+    fde3 = np.take_along_axis(fde, k3, axis=1).min(axis=-1)
+    ade5 = np.take_along_axis(ade, k5, axis=1).min(axis=-1)
+    fde5 = np.take_along_axis(fde, k5, axis=1).min(axis=-1)
+    min_ade = ade.min(axis=-1)
+    min_fde = fde.min(axis=-1)
+    ml_ade = ade[b, k_ml]
+    ml_fde = fde[b, k_ml]
     return {
-        "minADE": float(ade.min(axis=-1).mean()),
-        "minFDE": float(fde.min(axis=-1).mean()),
-        "mlADE": float(ade[b, k_ml].mean()),
-        "mlFDE": float(fde[b, k_ml].mean()),
+        "minADE": float(min_ade.mean()),
+        "minFDE": float(min_fde.mean()),
+        "mlADE": float(ml_ade.mean()),
+        "mlFDE": float(ml_fde.mean()),
+        "top3ADE": float(ade3.mean()),
+        "top3FDE": float(fde3.mean()),
+        "top5ADE": float(ade5.mean()),
+        "top5FDE": float(fde5.mean()),
+        "selectionGapADE": float((ml_ade - min_ade).mean()),
+        "selectionGapFDE": float((ml_fde - min_fde).mean()),
+        "oracleModeRate": float((k_ml == ade.argmin(axis=-1)).mean()),
         "MR2": float((fde.min(axis=-1) > 2.0).mean()),
         "MR5": float((fde.min(axis=-1) > 5.0).mean()),
     }
